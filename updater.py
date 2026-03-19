@@ -20,7 +20,7 @@ from pathlib import Path
 
 GITHUB_USER  = "Pasking200087"          # ваш логин на GitHub
 GITHUB_REPO  = "OBDII"    # название репозитория
-GITHUB_TOKEN = "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"          # Personal Access Token (read:packages, contents)
+GITHUB_TOKEN = "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"          # Personal Access Token (read:packages, contents)
 
 # API endpoint последнего релиза
 RELEASE_URL = (
@@ -46,19 +46,16 @@ def _get_token() -> str:
     return GITHUB_TOKEN
 
 
-def _gh_request(url: str) -> dict | None:
-    """GET-запрос к GitHub API с авторизацией."""
+def _gh_request(url: str) -> dict:
+    """GET-запрос к GitHub API с авторизацией. Бросает исключение при ошибке."""
     token = _get_token()
     req = urllib.request.Request(url, headers={
         "Authorization": f"token {token}",
         "Accept":        "application/vnd.github.v3+json",
         "User-Agent":    "OBD2-Diagnostics-Updater/1.0",
     })
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())
-    except Exception:
-        return None
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
 
 
 def _download_file(url: str, dest: Path) -> bool:
@@ -143,14 +140,16 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
     new_exe     = tmp_dir / "OBD2_Diagnostics_new.exe"
 
     # Скачиваем с прогрессом
+    # GitHub API для приватных ассетов делает редирект на S3 — нужен Accept: octet-stream
     token = _get_token()
+    opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
     req = urllib.request.Request(download_url, headers={
         "Authorization": f"token {token}",
         "Accept":        "application/octet-stream",
         "User-Agent":    "OBD2-Diagnostics-Updater/1.0",
     })
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with opener.open(req, timeout=120) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             with open(new_exe, "wb") as f:
@@ -166,15 +165,19 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
         return False
 
     # Bat-скрипт: ждёт закрытия программы → заменяет exe → перезапускает
+    # Используем cp866 (кодировка консоли Windows) чтобы поддержать кирилицу в путях
     bat = tmp_dir / "do_update.bat"
-    bat.write_text(
-        f"@echo off\n"
-        f"ping 127.0.0.1 -n 3 >nul\n"                         # пауза 2 сек
+    bat_content = (
+        "@echo off\n"
+        "ping 127.0.0.1 -n 4 >nul\n"
         f"move /Y \"{new_exe}\" \"{current_exe}\"\n"
         f"start \"\" \"{current_exe}\"\n"
-        f"del \"%~f0\"\n",
-        encoding="ascii"
+        "del \"%~f0\"\n"
     )
+    try:
+        bat.write_text(bat_content, encoding="cp866")
+    except (UnicodeEncodeError, LookupError):
+        bat.write_bytes(bat_content.encode("utf-8"))
 
     subprocess.Popen(
         ["cmd", "/c", str(bat)],
@@ -184,19 +187,22 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
     return True
 
 
-def check_async(on_update_found, on_error=None):
+def check_async(on_update_found, on_error=None, on_up_to_date=None):
     """
     Запускает проверку обновления в фоновом потоке.
     on_update_found(info: dict) — вызывается если есть обновление.
-    on_error() — вызывается при ошибке сети.
+    on_error(msg: str)          — вызывается при ошибке сети/токена.
+    on_up_to_date()             — вызывается если версия актуальна.
     """
     def _worker():
         try:
             info = check_for_update()
             if info:
                 on_update_found(info)
-        except Exception:
+            elif on_up_to_date:
+                on_up_to_date()
+        except Exception as e:
             if on_error:
-                on_error()
+                on_error(str(e))
 
     threading.Thread(target=_worker, daemon=True).start()

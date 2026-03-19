@@ -452,7 +452,8 @@ class OBDApp(tk.Tk):
         self._log("Проверка обновлений...")
         updater.check_async(
             on_update_found=lambda info: self.after(0, lambda: self._show_update_dialog(info)),
-            on_error=lambda: self._log("Нет связи — проверка обновлений пропущена"),
+            on_error=lambda msg: self.after(0, lambda: self._log(f"Ошибка проверки обновлений: {msg}")),
+            on_up_to_date=lambda: self.after(0, lambda: self._log("Версия актуальна, обновлений нет")),
         )
 
     def _show_update_dialog(self, info: dict):
