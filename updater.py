@@ -9,6 +9,7 @@ import tempfile
 import threading
 import subprocess
 import urllib.request
+import zipfile
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────
@@ -18,7 +19,6 @@ from pathlib import Path
 GITHUB_USER  = "Pasking200087"
 GITHUB_REPO  = "OBDII"
 
-# API endpoint последнего релиза (публичный, без токена)
 RELEASE_URL = (
     f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}"
     f"/releases/latest"
@@ -33,13 +33,20 @@ CURRENT_VERSION = "dev"
 # ─────────────────────────────────────────────────────────
 
 def _gh_request(url: str) -> dict:
-    """GET к GitHub API. Бросает исключение при ошибке."""
     req = urllib.request.Request(url, headers={
         "Accept":     "application/vnd.github.v3+json",
         "User-Agent": "OBD2-Diagnostics-Updater/1.0",
     })
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode())
+
+
+def _is_zip(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"PK\x03\x04"
+    except Exception:
+        return False
 
 
 # ─────────────────────────────────────────────────────────
@@ -51,44 +58,44 @@ def get_current_version() -> str:
 
 
 def check_for_update() -> dict | None:
-    """
-    Проверяет наличие новой версии.
-    Возвращает dict или None если обновлений нет.
-    """
+    """Проверяет наличие новой версии. Возвращает dict или None."""
     data = _gh_request(RELEASE_URL)
 
     remote_ver = data.get("tag_name", "")
     if not remote_ver or remote_ver == CURRENT_VERSION:
-        return None   # уже актуальная версия
+        return None
 
     assets = data.get("assets", [])
     if not assets:
-        return None   # релиз есть, но exe ещё не загружен (сборка идёт)
+        return None
 
     asset   = assets[0]
     size_mb = round(asset.get("size", 0) / 1024 / 1024, 1)
 
-    # browser_download_url — прямая ссылка, работает без токена для публичных репо
     return {
         "version":      remote_ver,
         "description":  data.get("body", ""),
         "download_url": asset["browser_download_url"],
+        "filename":     asset.get("name", ""),
         "size_mb":      size_mb,
     }
 
 
 def apply_update(download_url: str, progress_cb=None) -> bool:
     """
-    Скачивает новый .exe и запускает bat-скрипт замены.
-    progress_cb(percent: int) вызывается в процессе загрузки.
+    Скачивает обновление (.zip или .exe) и запускает замену.
+    Определяет формат автоматически по содержимому файла.
     """
     if not download_url:
         return False
 
+    # sys.executable — путь к запущенному .exe
     current_exe = Path(sys.executable)
+    install_dir = current_exe.parent
     tmp_dir     = Path(tempfile.mkdtemp())
-    new_exe     = tmp_dir / "OBD2_Diagnostics_new.exe"
+    download_to = tmp_dir / "update_download"
 
+    # ── Скачиваем ────────────────────────────────────────
     req = urllib.request.Request(download_url, headers={
         "User-Agent": "OBD2-Diagnostics-Updater/1.0",
     })
@@ -96,7 +103,7 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
         with urllib.request.urlopen(req, timeout=120) as resp:
             total      = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
-            with open(new_exe, "wb") as f:
+            with open(download_to, "wb") as f:
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
@@ -108,23 +115,61 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
     except Exception:
         return False
 
-    # Проверяем: скачанный файл должен быть EXE (Magic: MZ)
-    try:
-        with open(new_exe, "rb") as f:
-            if f.read(2) != b"MZ":
-                return False
-    except Exception:
-        return False
+    # ── Определяем формат и готовим замену ───────────────
+    if _is_zip(download_to):
+        # Новый формат: zip с папкой OBD2_Diagnostics/
+        extract_dir = tmp_dir / "extracted"
+        try:
+            with zipfile.ZipFile(download_to, "r") as zf:
+                zf.extractall(extract_dir)
+        except Exception:
+            return False
 
-    # Bat-скрипт: ждёт закрытия → заменяет exe → перезапускает
-    bat = tmp_dir / "do_update.bat"
-    bat_content = (
-        "@echo off\n"
-        "ping 127.0.0.1 -n 4 >nul\n"
-        f"move /Y \"{new_exe}\" \"{current_exe}\"\n"
-        f"start \"\" \"{current_exe}\"\n"
-        "del \"%~f0\"\n"
-    )
+        # Папка внутри zip: OBD2_Diagnostics/
+        new_dir = extract_dir / "OBD2_Diagnostics"
+        if not new_dir.exists():
+            new_dir = extract_dir
+
+        if not (new_dir / "OBD2_Diagnostics.exe").exists():
+            return False
+
+        # PowerShell Copy-Item — надёжно работает с пробелами в путях
+        ps_src = str(new_dir).replace("'", "''")
+        ps_dst = str(install_dir).replace("'", "''")
+
+        bat = tmp_dir / "do_update.bat"
+        bat_lines = [
+            "@echo off",
+            "ping 127.0.0.1 -n 4 >nul",
+            f"powershell -NoProfile -Command \"Copy-Item -Path '{ps_src}\\*' -Destination '{ps_dst}' -Recurse -Force\"",
+            f"start \"\" \"{install_dir}\\OBD2_Diagnostics.exe\"",
+            "del \"%~f0\"",
+        ]
+
+    else:
+        # Старый формат или одиночный exe
+        # Проверяем MZ-заголовок
+        try:
+            with open(download_to, "rb") as f:
+                if f.read(2) != b"MZ":
+                    return False
+        except Exception:
+            return False
+
+        new_exe = tmp_dir / "OBD2_Diagnostics_new.exe"
+        download_to.rename(new_exe)
+
+        bat = tmp_dir / "do_update.bat"
+        bat_lines = [
+            "@echo off",
+            "ping 127.0.0.1 -n 4 >nul",
+            f"move /Y \"{new_exe}\" \"{current_exe}\"",
+            f"start \"\" \"{current_exe}\"",
+            "del \"%~f0\"",
+        ]
+
+    # ── Записываем и запускаем bat ────────────────────────
+    bat_content = "\r\n".join(bat_lines) + "\r\n"
     try:
         bat.write_text(bat_content, encoding="cp866")
     except (UnicodeEncodeError, LookupError):
@@ -138,12 +183,7 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
 
 
 def check_async(on_update_found, on_error=None, on_up_to_date=None):
-    """
-    Запускает проверку обновления в фоновом потоке.
-    on_update_found(info: dict) — вызывается если есть обновление.
-    on_error(msg: str)          — вызывается при ошибке сети.
-    on_up_to_date()             — вызывается если версия актуальна.
-    """
+    """Запускает проверку обновления в фоновом потоке."""
     def _worker():
         try:
             info = check_for_update()
