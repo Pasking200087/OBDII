@@ -353,13 +353,13 @@ class OBDApp(tk.Tk):
     # ── Действия ─────────────────────────────────────────
 
     def _get_protocol_number(self):
-        """Перевод названия протокола в номер ELM327."""
+        """Перевод названия протокола в номер ELM327 (AT SP N)."""
         mapping = {
-            "AUTO":              None,
-            "ISO 9141-2 (до 2008)": obd.protocols.ISO_9141_2       if not DEMO_MODE_FORCED else None,
-            "KWP2000":           obd.protocols.ISO_14230_4_KWP      if not DEMO_MODE_FORCED else None,
-            "CAN 11bit":         obd.protocols.ISO_15765_4_11bit_500k if not DEMO_MODE_FORCED else None,
-            "CAN 29bit":         obd.protocols.ISO_15765_4_29bit_500k if not DEMO_MODE_FORCED else None,
+            "AUTO":                  None,
+            "ISO 9141-2 (до 2008)":  "3",
+            "KWP2000":               "5",
+            "CAN 11bit":             "6",
+            "CAN 29bit":             "7",
         }
         return mapping.get(self.proto_var.get(), None)
 
@@ -459,9 +459,10 @@ class OBDApp(tk.Tk):
 
         def do_connect():
             try:
-                target_port = port
-                if target_port is None:
-                    # Сканируем доступные порты
+                proto = self._get_protocol_number()
+                timeout = 15 if proto == "3" else 5  # ISO 9141 медленный
+
+                if port is None:
                     found_ports = obd.scan_serial()
                     if not found_ports:
                         self.after(0, lambda: self._on_connect_fail(
@@ -471,23 +472,31 @@ class OBDApp(tk.Tk):
                         ))
                         return
                     self.after(0, lambda: self._log(f"Найдены порты: {', '.join(found_ports)}"))
-                    target_port = found_ports[0]
-                    self.after(0, lambda: self._log(f"Пробуем порт: {target_port}"))
+                else:
+                    found_ports = [port]
 
-                timeout = 30 if "9141" in proto_name else 10
-                conn = obd.OBD(
-                    portstr=target_port,
-                    fast=False,
-                    timeout=timeout,
-                )
-                if conn.status() == OBDStatus.NOT_CONNECTED:
+                conn = None
+                connected_port = None
+                for p in found_ports:
+                    self.after(0, lambda p=p: self._log(f"Пробуем порт: {p}..."))
+                    try:
+                        c = obd.OBD(portstr=p, protocol=proto, fast=False, timeout=timeout)
+                        if c.status() != OBDStatus.NOT_CONNECTED:
+                            conn = c
+                            connected_port = p
+                            break
+                        c.close()
+                    except Exception as e:
+                        self.after(0, lambda e=e: self._log(f"  → ошибка: {e}"))
+
+                if conn is None:
                     self.after(0, lambda: self._on_connect_fail(
-                        "Адаптер не отвечает.\n\n"
-                        "Для Kia Magentis 2004 выберите протокол\n"
+                        "Адаптер не отвечает ни на одном порту.\n\n"
+                        "Для старых авто (до 2004) выберите протокол\n"
                         "'ISO 9141-2 (до 2008)' и попробуйте снова."
                     ))
                 else:
-                    self.after(0, lambda: self._log(f"Подключено на порту: {target_port}"))
+                    self.after(0, lambda: self._log(f"Подключено на порту: {connected_port}"))
                     self.connection = conn
                     self.after(0, self._on_connect_ok)
             except Exception as e:
