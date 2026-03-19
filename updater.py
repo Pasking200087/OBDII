@@ -9,6 +9,7 @@ import tempfile
 import threading
 import subprocess
 import urllib.request
+import zipfile
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────
@@ -79,17 +80,18 @@ def check_for_update() -> dict | None:
 
 def apply_update(download_url: str, progress_cb=None) -> bool:
     """
-    Скачивает новый .exe и запускает bat-скрипт замены.
+    Скачивает .zip, распаковывает рядом с текущим exe и перезапускает.
     progress_cb(percent: int) вызывается в процессе загрузки.
     """
     if not download_url:
         return False
 
     current_exe = Path(sys.executable)
+    install_dir = current_exe.parent
     tmp_dir     = Path(tempfile.mkdtemp())
-    new_exe     = tmp_dir / "OBD2_Diagnostics_new.exe"
+    zip_path    = tmp_dir / "OBD2_Diagnostics.zip"
 
-    # Скачиваем напрямую (публичный релиз, токен не нужен)
+    # Скачиваем zip
     req = urllib.request.Request(download_url, headers={
         "User-Agent": "OBD2-Diagnostics-Updater/1.0",
     })
@@ -97,7 +99,7 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
         with urllib.request.urlopen(req, timeout=120) as resp:
             total      = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
-            with open(new_exe, "wb") as f:
+            with open(zip_path, "wb") as f:
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
@@ -109,13 +111,31 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
     except Exception:
         return False
 
-    # Bat-скрипт: ждёт закрытия → заменяет exe → перезапускает
+    # Распаковываем zip во временную папку
+    extract_dir = tmp_dir / "extracted"
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+    except Exception:
+        return False
+
+    # Содержимое архива: OBD2_Diagnostics\* → копируем в install_dir
+    new_dir = extract_dir / "OBD2_Diagnostics"
+    if not new_dir.exists():
+        # на случай если архив без подпапки
+        new_dir = extract_dir
+
+    new_exe = new_dir / "OBD2_Diagnostics.exe"
+    if not new_exe.exists():
+        return False
+
+    # Bat-скрипт: ждёт закрытия → xcopy новых файлов → перезапускает
     bat = tmp_dir / "do_update.bat"
     bat_content = (
         "@echo off\n"
         "ping 127.0.0.1 -n 4 >nul\n"
-        f"move /Y \"{new_exe}\" \"{current_exe}\"\n"
-        f"start \"\" \"{current_exe}\"\n"
+        f"xcopy /E /Y /I \"{new_dir}\\*\" \"{install_dir}\\\"\n"
+        f"start \"\" \"{install_dir}\\OBD2_Diagnostics.exe\"\n"
         "del \"%~f0\"\n"
     )
     try:

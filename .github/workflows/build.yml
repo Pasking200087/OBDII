@@ -37,10 +37,13 @@ jobs:
           Set-Content updater.py $content -NoNewline
 
       - name: Install dependencies
-        run: pip install obd pyinstaller --quiet
+        run: pip install obd pyserial pyinstaller --quiet
 
       - name: Build exe
-        run: pyinstaller --onefile --windowed --name "OBD2_Diagnostics" --add-data "updater.py;." car_diagnostics_gui.py
+        shell: pwsh
+        run: |
+          pyinstaller --onedir --windowed --name "OBD2_Diagnostics" --add-data "updater.py;." car_diagnostics_gui.py
+          Compress-Archive -Path dist\OBD2_Diagnostics -DestinationPath dist\OBD2_Diagnostics.zip
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -48,5 +51,5 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "OBD2 Diagnostics ${{ steps.version.outputs.tag }}"
           body: "Автосборка из коммита ${{ github.sha }}\n\n${{ github.event.head_commit.message }}"
-          files: dist/OBD2_Diagnostics.exe
+          files: dist/OBD2_Diagnostics.zip
           make_latest: true
