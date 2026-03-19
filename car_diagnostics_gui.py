@@ -1280,8 +1280,8 @@ class OBDApp(tk.Tk):
 
     def _toggle_connect(self):
         """Кнопка «Подключить» / «✕ Отмена» — переключается по состоянию."""
-        if self._connect_cancel.is_set() or self.btn_connect["text"].startswith("✕"):
-            # Сейчас идёт подключение — отменяем
+        if self.btn_connect["text"].startswith("✕"):
+            # Идёт подключение — отменяем
             self._connect_cancel.set()
             self._log("Подключение отменено пользователем")
             self._update_status("● Не подключено", COLORS["red"])
@@ -1592,15 +1592,50 @@ class OBDApp(tk.Tk):
     def _real_scan_dtc(self):
         result = []
         try:
-            for cmd, label in [(obd.commands.GET_DTC, "Активная"),
+            # Сначала читаем статус MIL и количество ошибок (Mode 01 PID 01)
+            st = self.connection.query(obd.commands.STATUS)
+            if not st.is_null() and st.value is not None:
+                mil = getattr(st.value, "MIL", None)
+                dtc_count = getattr(st.value, "DTC_count", None)
+                mil_str = "ВКЛ (Check Engine горит)" if mil else "выкл"
+                self.after(0, lambda: self._log(
+                    f"MIL (Check Engine): {mil_str}"
+                    + (f", ошибок по счётчику: {dtc_count}" if dtc_count is not None else "")
+                ))
+            else:
+                self.after(0, lambda: self._log(
+                    "STATUS (Mode 01 PID 01): нет ответа — возможно старый протокол"
+                ))
+
+            # Читаем активные и замороженные коды
+            for cmd, label in [(obd.commands.GET_DTC,        "Активная"),
                                 (obd.commands.GET_FREEZE_DTC, "Замороженная")]:
-                resp = self.connection.query(cmd)
-                if not resp.is_null():
-                    for dtc in resp.value:
-                        code = str(dtc[0]) if dtc[0] else "???"
-                        desc = DTC_DESCRIPTIONS.get(code, "Нет описания")
+                try:
+                    resp = self.connection.query(cmd)
+                    if resp.is_null() or resp.value is None:
+                        self.after(0, lambda lb=label: self._log(
+                            f"DTC ({lb}): нет ответа от авто"
+                        ))
+                        continue
+                    codes = resp.value
+                    self.after(0, lambda lb=label, n=len(codes): self._log(
+                        f"DTC ({lb}): получено {n} кодов"
+                    ))
+                    for dtc in codes:
+                        # dtc может быть кортежем (код, описание) или просто строкой
+                        if isinstance(dtc, (list, tuple)):
+                            code = str(dtc[0]).strip() if dtc[0] else "???"
+                        else:
+                            code = str(dtc).strip()
+                        if not code or code == "None":
+                            continue
+                        desc = DTC_DESCRIPTIONS.get(code, "Нет описания в базе")
                         sev  = _dtc_severity(code)
                         result.append((code, label, desc, sev))
+                except Exception as e:
+                    self.after(0, lambda lb=label, e=e: self._log(
+                        f"Ошибка чтения DTC ({lb}): {e}"
+                    ))
         except Exception as e:
             self._log(f"Ошибка считывания DTC: {e}")
         return result
