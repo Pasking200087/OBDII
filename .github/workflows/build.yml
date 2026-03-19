@@ -39,11 +39,18 @@ jobs:
       - name: Install dependencies
         run: pip install obd pyserial pyinstaller --upgrade --quiet
 
-      - name: Build exe
+      - name: Build app (onedir)
         shell: pwsh
         run: |
           pyinstaller --onedir --windowed --name "OBD2_Diagnostics" --add-data "updater.py;." car_diagnostics_gui.py
-          Compress-Archive -Path dist\OBD2_Diagnostics -DestinationPath dist\OBD2_Diagnostics.zip
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc /DAppVersion=$tag installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -51,5 +58,5 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "OBD2 Diagnostics ${{ steps.version.outputs.tag }}"
           body: "Автосборка из коммита ${{ github.sha }}\n\n${{ github.event.head_commit.message }}"
-          files: dist/OBD2_Diagnostics.zip
+          files: Output/OBD2_Diagnostics_Setup.exe
           make_latest: true

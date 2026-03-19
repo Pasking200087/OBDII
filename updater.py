@@ -9,7 +9,6 @@ import tempfile
 import threading
 import subprocess
 import urllib.request
-import zipfile
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────
@@ -41,10 +40,11 @@ def _gh_request(url: str) -> dict:
         return json.loads(resp.read().decode())
 
 
-def _is_zip(path: Path) -> bool:
+def _is_exe(path: Path) -> bool:
+    """Проверяет MZ-заголовок (Windows PE / Inno Setup installer)."""
     try:
         with open(path, "rb") as f:
-            return f.read(4) == b"PK\x03\x04"
+            return f.read(2) == b"MZ"
     except Exception:
         return False
 
@@ -69,7 +69,11 @@ def check_for_update() -> dict | None:
     if not assets:
         return None
 
-    asset   = assets[0]
+    # Предпочитаем Setup.exe, иначе берём первый ассет
+    asset = next(
+        (a for a in assets if a.get("name", "").endswith("_Setup.exe")),
+        assets[0],
+    )
     size_mb = round(asset.get("size", 0) / 1024 / 1024, 1)
 
     return {
@@ -83,17 +87,14 @@ def check_for_update() -> dict | None:
 
 def apply_update(download_url: str, progress_cb=None) -> bool:
     """
-    Скачивает обновление (.zip или .exe) и запускает замену.
-    Определяет формат автоматически по содержимому файла.
+    Скачивает установщик (.exe) и запускает его тихо (/SILENT).
+    Inno Setup сам закроет старую версию, установит новую и перезапустит.
     """
     if not download_url:
         return False
 
-    # sys.executable — путь к запущенному .exe
-    current_exe = Path(sys.executable)
-    install_dir = current_exe.parent
     tmp_dir     = Path(tempfile.mkdtemp())
-    download_to = tmp_dir / "update_download"
+    installer   = tmp_dir / "OBD2_Diagnostics_Setup.exe"
 
     # ── Скачиваем ────────────────────────────────────────
     req = urllib.request.Request(download_url, headers={
@@ -103,7 +104,7 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
         with urllib.request.urlopen(req, timeout=120) as resp:
             total      = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
-            with open(download_to, "wb") as f:
+            with open(installer, "wb") as f:
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
@@ -115,60 +116,20 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
     except Exception:
         return False
 
-    # ── Определяем формат и готовим замену ───────────────
-    if _is_zip(download_to):
-        # Новый формат: zip с папкой OBD2_Diagnostics/
-        extract_dir = tmp_dir / "extracted"
-        try:
-            with zipfile.ZipFile(download_to, "r") as zf:
-                zf.extractall(extract_dir)
-        except Exception:
-            return False
+    if not _is_exe(installer):
+        return False
 
-        # Папка внутри zip: OBD2_Diagnostics/
-        new_dir = extract_dir / "OBD2_Diagnostics"
-        if not new_dir.exists():
-            new_dir = extract_dir
-
-        if not (new_dir / "OBD2_Diagnostics.exe").exists():
-            return False
-
-        # PowerShell Copy-Item — надёжно работает с пробелами в путях
-        ps_src = str(new_dir).replace("'", "''")
-        ps_dst = str(install_dir).replace("'", "''")
-
-        bat = tmp_dir / "do_update.bat"
-        bat_lines = [
-            "@echo off",
-            "ping 127.0.0.1 -n 4 >nul",
-            f"powershell -NoProfile -Command \"Copy-Item -Path '{ps_src}\\*' -Destination '{ps_dst}' -Recurse -Force\"",
-            f"start \"\" \"{install_dir}\\OBD2_Diagnostics.exe\"",
-            "del \"%~f0\"",
-        ]
-
-    else:
-        # Старый формат или одиночный exe
-        # Проверяем MZ-заголовок
-        try:
-            with open(download_to, "rb") as f:
-                if f.read(2) != b"MZ":
-                    return False
-        except Exception:
-            return False
-
-        new_exe = tmp_dir / "OBD2_Diagnostics_new.exe"
-        download_to.rename(new_exe)
-
-        bat = tmp_dir / "do_update.bat"
-        bat_lines = [
-            "@echo off",
-            "ping 127.0.0.1 -n 4 >nul",
-            f"move /Y \"{new_exe}\" \"{current_exe}\"",
-            f"start \"\" \"{current_exe}\"",
-            "del \"%~f0\"",
-        ]
-
-    # ── Записываем и запускаем bat ────────────────────────
+    # ── Bat-скрипт: ждём закрытия приложения, запускаем установщик ──
+    # /SILENT   — тихая установка с полосой прогресса
+    # /NORESTART — не перезагружать ПК
+    # /CLOSEAPPLICATIONS — закрыть запущенные копии программы
+    bat = tmp_dir / "do_update.bat"
+    bat_lines = [
+        "@echo off",
+        "ping 127.0.0.1 -n 4 >nul",
+        f"\"{installer}\" /SILENT /NORESTART /CLOSEAPPLICATIONS",
+        "del \"%~f0\"",
+    ]
     bat_content = "\r\n".join(bat_lines) + "\r\n"
     try:
         bat.write_text(bat_content, encoding="cp866")
