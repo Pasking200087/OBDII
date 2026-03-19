@@ -16,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
       - name: Generate version tag
         id: version
@@ -37,13 +37,10 @@ jobs:
           Set-Content updater.py $content -NoNewline
 
       - name: Install dependencies
-        run: pip install obd pyserial pyinstaller --quiet
+        run: pip install obd pyserial pyinstaller --upgrade --quiet
 
       - name: Build exe
-        shell: pwsh
-        run: |
-          pyinstaller --onedir --windowed --name "OBD2_Diagnostics" --add-data "updater.py;." car_diagnostics_gui.py
-          Compress-Archive -Path dist\OBD2_Diagnostics -DestinationPath dist\OBD2_Diagnostics.zip
+        run: pyinstaller --onefile --windowed --name "OBD2_Diagnostics" --add-data "updater.py;." car_diagnostics_gui.py
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -51,5 +48,5 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "OBD2 Diagnostics ${{ steps.version.outputs.tag }}"
           body: "Автосборка из коммита ${{ github.sha }}\n\n${{ github.event.head_commit.message }}"
-          files: dist/OBD2_Diagnostics.zip
+          files: dist/OBD2_Diagnostics.exe
           make_latest: true

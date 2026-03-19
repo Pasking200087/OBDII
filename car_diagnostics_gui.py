@@ -1021,12 +1021,8 @@ class OBDApp(tk.Tk):
                                  values=["AUTO", "ISO 9141-2 (до 2008)", "KWP2000", "CAN 11bit", "CAN 29bit"])
         proto_cb.pack(side="left", padx=4)
 
-        self.btn_connect = self._btn(ctrl, "⚡ Подключить", self._connect, COLORS["accent"])
+        self.btn_connect = self._btn(ctrl, "⚡ Подключить", self._toggle_connect, COLORS["accent"])
         self.btn_connect.pack(side="left", padx=6)
-
-        self.btn_cancel = self._btn(ctrl, "✕ Отмена", self._cancel_connect, COLORS["red"])
-        self.btn_cancel.pack(side="left", padx=2)
-        self.btn_cancel.config(state="disabled")
 
         self.btn_scan = self._btn(ctrl, "🔍 Сканировать", self._scan, COLORS["green"])
         self.btn_scan.pack(side="left", padx=6)
@@ -1282,12 +1278,16 @@ class OBDApp(tk.Tk):
         if self.port_var.get() not in ports:
             self.port_var.set("AUTO")
 
-    def _cancel_connect(self):
-        self._connect_cancel.set()
-        self.btn_cancel.config(state="disabled")
-        self._log("Подключение отменено пользователем")
-        self._update_status("● Не подключено", COLORS["red"])
-        self.btn_connect.config(state="normal")
+    def _toggle_connect(self):
+        """Кнопка «Подключить» / «✕ Отмена» — переключается по состоянию."""
+        if self._connect_cancel.is_set() or self.btn_connect["text"].startswith("✕"):
+            # Сейчас идёт подключение — отменяем
+            self._connect_cancel.set()
+            self._log("Подключение отменено пользователем")
+            self._update_status("● Не подключено", COLORS["red"])
+            self.btn_connect.config(text="⚡ Подключить", bg=COLORS["accent"])
+        else:
+            self._connect()
 
     def _connect(self):
         if self.demo_var.get() or DEMO_MODE_FORCED:
@@ -1306,8 +1306,7 @@ class OBDApp(tk.Tk):
         self._log(f"Подключение: порт={port or 'авто'}, протокол={proto_name}")
         self._update_status("⟳ Подключение...", COLORS["yellow"])
         self._connect_cancel.clear()
-        self.btn_connect.config(state="disabled")
-        self.btn_cancel.config(state="normal")
+        self.btn_connect.config(text="✕ Отмена", bg=COLORS["red"])
 
         def do_connect():
             try:
@@ -1390,8 +1389,7 @@ class OBDApp(tk.Tk):
     def _on_connect_ok(self):
         self._update_status("● Подключено", COLORS["green"])
         self._log("Подключено к автомобилю!")
-        self.btn_connect.config(state="normal")
-        self.btn_cancel.config(state="disabled")
+        self.btn_connect.config(text="⚡ Подключить", bg=COLORS["accent"])
         self.btn_scan.config(state="normal")
         self.btn_live.config(state="normal")
         threading.Thread(target=self._read_vehicle_info, daemon=True).start()
@@ -1420,8 +1418,7 @@ class OBDApp(tk.Tk):
     def _on_connect_fail(self, msg):
         self._update_status("● Не подключено", COLORS["red"])
         self._log(f"Ошибка подключения: {msg}")
-        self.btn_connect.config(state="normal")
-        self.btn_cancel.config(state="disabled")
+        self.btn_connect.config(text="⚡ Подключить", bg=COLORS["accent"])
         messagebox.showerror("Ошибка подключения",
             f"{msg}\n\nПроверьте:\n"
             "• Адаптер вставлен в OBD-II разъём\n"
