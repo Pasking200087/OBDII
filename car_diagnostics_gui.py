@@ -459,14 +459,26 @@ class OBDApp(tk.Tk):
 
         def do_connect():
             try:
-                # Для старых авто (ISO 9141-2) нужен медленный init и fast=False
-                fast = False
+                target_port = port
+                if target_port is None:
+                    # Сканируем доступные порты
+                    found_ports = obd.scan_serial()
+                    if not found_ports:
+                        self.after(0, lambda: self._on_connect_fail(
+                            "OBD-адаптер не найден.\n\n"
+                            "Убедитесь, что адаптер подключён к USB/Bluetooth\n"
+                            "и драйвер установлен."
+                        ))
+                        return
+                    self.after(0, lambda: self._log(f"Найдены порты: {', '.join(found_ports)}"))
+                    target_port = found_ports[0]
+                    self.after(0, lambda: self._log(f"Пробуем порт: {target_port}"))
+
                 timeout = 30 if "9141" in proto_name else 10
                 conn = obd.OBD(
-                    portstr=port,
-                    fast=fast,
+                    portstr=target_port,
+                    fast=False,
                     timeout=timeout,
-                    delay_cmds=0.5 if "9141" in proto_name else 0.1,
                 )
                 if conn.status() == OBDStatus.NOT_CONNECTED:
                     self.after(0, lambda: self._on_connect_fail(
@@ -475,6 +487,7 @@ class OBDApp(tk.Tk):
                         "'ISO 9141-2 (до 2008)' и попробуйте снова."
                     ))
                 else:
+                    self.after(0, lambda: self._log(f"Подключено на порту: {target_port}"))
                     self.connection = conn
                     self.after(0, self._on_connect_ok)
             except Exception as e:
