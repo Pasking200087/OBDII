@@ -1,89 +1,50 @@
 """
-updater.py — автообновление через GitHub (приватный репозиторий)
+updater.py — автообновление через GitHub (публичный репозиторий)
 Используется в car_diagnostics_gui.py при каждом запуске.
 """
 
-import os
 import sys
 import json
-import shutil
 import tempfile
 import threading
 import subprocess
 import urllib.request
-import urllib.error
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────
-# НАСТРОЙКИ — заполните перед сборкой
+# НАСТРОЙКИ
 # ─────────────────────────────────────────────────────────
 
-GITHUB_USER  = "Pasking200087"          # ваш логин на GitHub
-GITHUB_REPO  = "OBDII"    # название репозитория
-GITHUB_TOKEN = "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"          # Personal Access Token (read:packages, contents)
+GITHUB_USER  = "Pasking200087"
+GITHUB_REPO  = "OBDII"
 
-# API endpoint последнего релиза
+# API endpoint последнего релиза (публичный, без токена)
 RELEASE_URL = (
     f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}"
     f"/releases/latest"
 )
 
-# Текущая версия программы (меняйте при каждом релизе)
-CURRENT_VERSION = "1.0.0"
-
-# Путь к конфигу с токеном (если хотите хранить отдельно от кода)
-TOKEN_FILE = Path(os.getenv("APPDATA", ".")) / "OBD2Diagnostics" / "token.cfg"
+# Текущая версия — GitHub Actions заменяет это значение при сборке
+CURRENT_VERSION = "dev"
 
 
 # ─────────────────────────────────────────────────────────
 # Вспомогательные
 # ─────────────────────────────────────────────────────────
 
-def _get_token() -> str:
-    """Берёт токен: сначала из TOKEN_FILE, потом из константы."""
-    if TOKEN_FILE.exists():
-        return TOKEN_FILE.read_text().strip()
-    return GITHUB_TOKEN
-
-
 def _gh_request(url: str) -> dict:
-    """GET-запрос к GitHub API с авторизацией. Бросает исключение при ошибке."""
-    token = _get_token()
+    """GET к GitHub API. Бросает исключение при ошибке."""
     req = urllib.request.Request(url, headers={
-        "Authorization": f"token {token}",
-        "Accept":        "application/vnd.github.v3+json",
-        "User-Agent":    "OBD2-Diagnostics-Updater/1.0",
+        "Accept":     "application/vnd.github.v3+json",
+        "User-Agent": "OBD2-Diagnostics-Updater/1.0",
     })
     with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read().decode())
 
 
-def _download_file(url: str, dest: Path) -> bool:
-    """Скачать файл с авторизацией GitHub."""
-    token = _get_token()
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"token {token}",
-        "Accept":        "application/octet-stream",
-        "User-Agent":    "OBD2-Diagnostics-Updater/1.0",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
-            shutil.copyfileobj(resp, f)
-        return True
-    except Exception:
-        return False
-
-
-
 # ─────────────────────────────────────────────────────────
 # Публичный API
 # ─────────────────────────────────────────────────────────
-
-def save_token(token: str):
-    """Сохранить токен в файл конфигурации."""
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(token.strip())
-
 
 def get_current_version() -> str:
     return CURRENT_VERSION
@@ -92,37 +53,26 @@ def get_current_version() -> str:
 def check_for_update() -> dict | None:
     """
     Проверяет наличие новой версии.
-    Возвращает dict с информацией об обновлении или None.
-    {
-        "version":      "1.1.0",
-        "description":  "Что изменилось",
-        "download_url": "https://...",
-        "size_mb":      4.2,
-    }
+    Возвращает dict или None если обновлений нет.
     """
     data = _gh_request(RELEASE_URL)
-    if not data or "tag_name" not in data:
-        return None
 
-    remote_ver = data["tag_name"]
-    if remote_ver == CURRENT_VERSION:
+    remote_ver = data.get("tag_name", "")
+    if not remote_ver or remote_ver == CURRENT_VERSION:
         return None   # уже актуальная версия
 
-    # Берём первый asset (.exe)
     assets = data.get("assets", [])
     if not assets:
-        return None
+        return None   # релиз есть, но exe ещё не загружен (сборка идёт)
 
-    asset = assets[0]
+    asset   = assets[0]
     size_mb = round(asset.get("size", 0) / 1024 / 1024, 1)
 
-    # URL для приватного репозитория — через API с авторизацией
-    asset_api_url = asset.get("url", "")
-
+    # browser_download_url — прямая ссылка, работает без токена для публичных репо
     return {
         "version":      remote_ver,
         "description":  data.get("body", ""),
-        "download_url": asset_api_url,
+        "download_url": asset["browser_download_url"],
         "size_mb":      size_mb,
     }
 
@@ -139,18 +89,13 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
     tmp_dir     = Path(tempfile.mkdtemp())
     new_exe     = tmp_dir / "OBD2_Diagnostics_new.exe"
 
-    # Скачиваем с прогрессом
-    # GitHub API для приватных ассетов делает редирект на S3 — нужен Accept: octet-stream
-    token = _get_token()
-    opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+    # Скачиваем напрямую (публичный релиз, токен не нужен)
     req = urllib.request.Request(download_url, headers={
-        "Authorization": f"token {token}",
-        "Accept":        "application/octet-stream",
-        "User-Agent":    "OBD2-Diagnostics-Updater/1.0",
+        "User-Agent": "OBD2-Diagnostics-Updater/1.0",
     })
     try:
-        with opener.open(req, timeout=120) as resp:
-            total = int(resp.headers.get("Content-Length", 0))
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            total      = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             with open(new_exe, "wb") as f:
                 while True:
@@ -164,8 +109,7 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
     except Exception:
         return False
 
-    # Bat-скрипт: ждёт закрытия программы → заменяет exe → перезапускает
-    # Используем cp866 (кодировка консоли Windows) чтобы поддержать кирилицу в путях
+    # Bat-скрипт: ждёт закрытия → заменяет exe → перезапускает
     bat = tmp_dir / "do_update.bat"
     bat_content = (
         "@echo off\n"
@@ -181,8 +125,7 @@ def apply_update(download_url: str, progress_cb=None) -> bool:
 
     subprocess.Popen(
         ["cmd", "/c", str(bat)],
-        creationflags=subprocess.CREATE_NO_WINDOW
-        if sys.platform == "win32" else 0
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
     return True
 
@@ -191,7 +134,7 @@ def check_async(on_update_found, on_error=None, on_up_to_date=None):
     """
     Запускает проверку обновления в фоновом потоке.
     on_update_found(info: dict) — вызывается если есть обновление.
-    on_error(msg: str)          — вызывается при ошибке сети/токена.
+    on_error(msg: str)          — вызывается при ошибке сети.
     on_up_to_date()             — вызывается если версия актуальна.
     """
     def _worker():
