@@ -12,6 +12,12 @@ import sys
 from datetime import datetime
 
 try:
+    import serial.tools.list_ports as list_ports
+    SERIAL_AVAILABLE = True
+except ImportError:
+    SERIAL_AVAILABLE = False
+
+try:
     import updater
     UPDATER_AVAILABLE = True
 except ImportError:
@@ -209,6 +215,7 @@ class OBDApp(tk.Tk):
         self.demo_mode  = DEMO_MODE_FORCED
         self.scanning   = False
         self.live_running = False
+        self._connect_cancel = threading.Event()
         self.vehicle_info = {}   # VIN, производитель, год
 
         self._build_ui()
@@ -247,13 +254,14 @@ class OBDApp(tk.Tk):
                  font=("Consolas", 10)).pack(side="left", padx=(12, 4))
 
         self.port_var = tk.StringVar(value="AUTO")
-        self.port_entry = tk.Entry(ctrl, textvariable=self.port_var, width=14,
-                                   bg=COLORS["bg"], fg=COLORS["text"],
-                                   insertbackground=COLORS["accent"],
-                                   relief="flat", font=("Consolas", 10),
-                                   highlightbackground=COLORS["border"],
-                                   highlightthickness=1)
-        self.port_entry.pack(side="left", padx=4)
+        self.port_combo = ttk.Combobox(ctrl, textvariable=self.port_var, width=12,
+                                       font=("Consolas", 9))
+        self.port_combo.pack(side="left", padx=4)
+        self._refresh_ports()
+
+        self.btn_refresh_ports = self._btn(ctrl, "↺", self._refresh_ports, COLORS["panel"])
+        self.btn_refresh_ports.config(fg=COLORS["text"], font=("Consolas", 12), padx=2)
+        self.btn_refresh_ports.pack(side="left", padx=0)
 
         self.demo_var = tk.BooleanVar(value=DEMO_MODE_FORCED)
         demo_cb = tk.Checkbutton(ctrl, text="Демо-режим",
@@ -276,6 +284,10 @@ class OBDApp(tk.Tk):
 
         self.btn_connect = self._btn(ctrl, "⚡ Подключить", self._connect, COLORS["accent"])
         self.btn_connect.pack(side="left", padx=6)
+
+        self.btn_cancel = self._btn(ctrl, "✕ Отмена", self._cancel_connect, COLORS["red"])
+        self.btn_cancel.pack(side="left", padx=2)
+        self.btn_cancel.config(state="disabled")
 
         self.btn_scan = self._btn(ctrl, "🔍 Сканировать", self._scan, COLORS["green"])
         self.btn_scan.pack(side="left", padx=6)
@@ -521,6 +533,23 @@ class OBDApp(tk.Tk):
         win.destroy()
         messagebox.showerror("Ошибка", "Не удалось загрузить обновление.\nПроверьте токен и интернет-соединение.")
 
+    def _refresh_ports(self):
+        """Обновляет список доступных COM-портов."""
+        ports = ["AUTO"]
+        if SERIAL_AVAILABLE:
+            found = sorted(p.device for p in list_ports.comports())
+            ports.extend(found)
+        self.port_combo["values"] = ports
+        if self.port_var.get() not in ports:
+            self.port_var.set("AUTO")
+
+    def _cancel_connect(self):
+        self._connect_cancel.set()
+        self.btn_cancel.config(state="disabled")
+        self._log("Подключение отменено пользователем")
+        self._update_status("● Не подключено", COLORS["red"])
+        self.btn_connect.config(state="normal")
+
     def _connect(self):
         if self.demo_var.get() or DEMO_MODE_FORCED:
             self.demo_mode = True
@@ -537,19 +566,38 @@ class OBDApp(tk.Tk):
         proto_name = self.proto_var.get()
         self._log(f"Подключение: порт={port or 'авто'}, протокол={proto_name}")
         self._update_status("⟳ Подключение...", COLORS["yellow"])
+        self._connect_cancel.clear()
+        self.btn_connect.config(state="disabled")
+        self.btn_cancel.config(state="normal")
 
         def do_connect():
             try:
                 proto = self._get_protocol_number()
-                timeout = 15 if proto == "3" else 5  # ISO 9141 медленный
+                timeout = 15 if proto == "3" else 8  # ISO 9141 медленный
 
                 if port is None:
-                    found_ports = obd.scan_serial()
+                    # Используем pyserial для поиска ВСЕХ портов (включая Bluetooth)
+                    if SERIAL_AVAILABLE:
+                        all_ports = [p.device for p in list_ports.comports()]
+                        # Дополнительно проверяем obd.scan_serial()
+                        try:
+                            obd_ports = obd.scan_serial()
+                            for p in obd_ports:
+                                if p not in all_ports:
+                                    all_ports.append(p)
+                        except Exception:
+                            pass
+                        found_ports = all_ports
+                    else:
+                        found_ports = obd.scan_serial()
+
                     if not found_ports:
                         self.after(0, lambda: self._on_connect_fail(
-                            "OBD-адаптер не найден.\n\n"
+                            "COM-порты не найдены.\n\n"
                             "Убедитесь, что адаптер подключён к USB/Bluetooth\n"
-                            "и драйвер установлен."
+                            "и драйвер установлен.\n\n"
+                            "Для Bluetooth ELM327: выберите конкретный\n"
+                            "COM-порт из выпадающего списка (обновите список ↺)."
                         ))
                         return
                     self.after(0, lambda: self._log(f"Найдены порты: {', '.join(found_ports)}"))
@@ -559,9 +607,17 @@ class OBDApp(tk.Tk):
                 conn = None
                 connected_port = None
                 for p in found_ports:
+                    if self._connect_cancel.is_set():
+                        return
                     self.after(0, lambda p=p: self._log(f"Пробуем порт: {p}..."))
                     try:
                         c = obd.OBD(portstr=p, protocol=proto, fast=False, timeout=timeout)
+                        if self._connect_cancel.is_set():
+                            try:
+                                c.close()
+                            except Exception:
+                                pass
+                            return
                         if c.status() != OBDStatus.NOT_CONNECTED:
                             conn = c
                             connected_port = p
@@ -570,11 +626,18 @@ class OBDApp(tk.Tk):
                     except Exception as e:
                         self.after(0, lambda e=e: self._log(f"  → ошибка: {e}"))
 
+                if self._connect_cancel.is_set():
+                    return
+
                 if conn is None:
                     self.after(0, lambda: self._on_connect_fail(
                         "Адаптер не отвечает ни на одном порту.\n\n"
-                        "Для старых авто (до 2004) выберите протокол\n"
-                        "'ISO 9141-2 (до 2008)' и попробуйте снова."
+                        "Советы:\n"
+                        "• Для Bluetooth ELM327 — выберите конкретный\n"
+                        "  COM-порт из списка (не AUTO)\n"
+                        "• Для старых авто (до 2004) выберите протокол\n"
+                        "  'ISO 9141-2 (до 2008)'\n"
+                        "• Убедитесь, что зажигание включено"
                     ))
                 else:
                     self.after(0, lambda: self._log(f"Подключено на порту: {connected_port}"))
@@ -588,6 +651,8 @@ class OBDApp(tk.Tk):
     def _on_connect_ok(self):
         self._update_status("● Подключено", COLORS["green"])
         self._log("Подключено к автомобилю!")
+        self.btn_connect.config(state="normal")
+        self.btn_cancel.config(state="disabled")
         self.btn_scan.config(state="normal")
         self.btn_live.config(state="normal")
         threading.Thread(target=self._read_vehicle_info, daemon=True).start()
@@ -616,6 +681,8 @@ class OBDApp(tk.Tk):
     def _on_connect_fail(self, msg):
         self._update_status("● Не подключено", COLORS["red"])
         self._log(f"Ошибка подключения: {msg}")
+        self.btn_connect.config(state="normal")
+        self.btn_cancel.config(state="disabled")
         messagebox.showerror("Ошибка подключения",
             f"{msg}\n\nПроверьте:\n"
             "• Адаптер вставлен в OBD-II разъём\n"
