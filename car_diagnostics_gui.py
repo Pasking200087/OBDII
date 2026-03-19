@@ -839,14 +839,16 @@ DEMO_LIVE = [
 ]
 
 DEMO_MONITORS = [
-    ("MIL (Check Engine)",          "Да",  "Готов"),
-    ("Пропуски зажигания",          "Да",  "Не завершён"),
-    ("Топливная система",            "Да",  "Готов"),
-    ("Каталитический нейтрализатор","Да",  "Не завершён"),
-    ("Система EVAP",                 "Да",  "Готов"),
-    ("Лямбда-зонд",                 "Да",  "Не завершён"),
-    ("Подогрев лямбда-зонда",       "Да",  "Готов"),
+    ("Пропуски зажигания",        "Да", "Не завершён"),
+    ("Топливная система",          "Да", "Готов"),
+    ("Компоненты (общий)",         "Да", "Готов"),
+    ("Катализатор",                "Да", "Не завершён"),
+    ("Система EVAP",               "Да", "Готов"),
+    ("Лямбда-зонды",               "Да", "Не завершён"),
+    ("Подогрев лямбда-зондов",    "Да", "Готов"),
+    ("EGR / VVT",                  "Да", "Готов"),
 ]
+DEMO_MON_SUMMARY = "Демо-режим  |  MIL: выкл  |  Тип зажигания: бензин  |  DTC по счётчику: 0"
 
 COLORS = {
     "bg":         "#0f1117",
@@ -1112,9 +1114,17 @@ class OBDApp(tk.Tk):
 
     def _build_monitor_tab(self):
         f = self.tab_monitors
+
+        self.mon_header = tk.Label(
+            f, text="Подключитесь и запустите сканирование",
+            bg=COLORS["bg"], fg=COLORS["text_dim"],
+            font=("Consolas", 10), anchor="w",
+        )
+        self.mon_header.pack(fill="x", padx=20, pady=(12, 4))
+
         cols = ("Система", "Поддерживается", "Готовность")
-        self.mon_tree = self._make_tree(f, cols, (280, 160, 160))
-        self.mon_tree.pack(fill="both", expand=True, padx=16, pady=16)
+        self.mon_tree = self._make_tree(f, cols, (300, 160, 160))
+        self.mon_tree.pack(fill="both", expand=True, padx=16, pady=(4, 16))
 
     # ── Вкладка: Журнал ──────────────────────────────────
 
@@ -1456,23 +1466,25 @@ class OBDApp(tk.Tk):
         self._log("Начало сканирования...")
         self._update_status("⟳ Сканирование...", COLORS["yellow"])
 
-        # Очистить таблицы
+        # Очистить таблицы и заголовок
         for tree in (self.dtc_tree, self.mon_tree):
             tree.delete(*tree.get_children())
+        self.mon_header.config(text="⟳ Опрос мониторов готовности...", fg=COLORS["yellow"])
 
         threading.Thread(target=self._do_scan, daemon=True).start()
 
     def _do_scan(self):
         time.sleep(1.2)  # имитация времени сканирования
         if self.demo_mode:
-            errors   = DEMO_ERRORS
-            monitors = DEMO_MONITORS
+            errors      = DEMO_ERRORS
+            monitors    = DEMO_MONITORS
+            mon_summary = DEMO_MON_SUMMARY
         else:
-            errors   = self._real_scan_dtc()
-            monitors = self._real_scan_monitors()
+            errors              = self._real_scan_dtc()
+            monitors, mon_summary = self._real_scan_monitors()
 
         self.after(0, lambda: self._populate_dtc(errors))
-        self.after(0, lambda: self._populate_monitors(monitors))
+        self.after(0, lambda: self._populate_monitors(monitors, mon_summary))
         self.after(0, lambda: self._on_scan_done(errors))
 
     def _populate_dtc(self, errors):
@@ -1488,7 +1500,16 @@ class OBDApp(tk.Tk):
             fg=color
         )
 
-    def _populate_monitors(self, monitors):
+    def _populate_monitors(self, monitors, summary=""):
+        if summary:
+            mil_on = "ВКЛ" in summary or "горит" in summary
+            color = COLORS["red"] if mil_on else COLORS["green"]
+            self.mon_header.config(text=summary, fg=color)
+        elif not monitors:
+            self.mon_header.config(
+                text="Мониторы не получены — автомобиль не отвечает на MODE 01 PID 01",
+                fg=COLORS["red"]
+            )
         for i, row in enumerate(monitors):
             ready = row[2]
             tag = "ok" if ready == "Готов" else ("even" if i % 2 == 0 else "odd")
@@ -1669,46 +1690,111 @@ class OBDApp(tk.Tk):
             self._log(f"Ошибка считывания DTC: {e}")
         return result
 
-    def _real_scan_monitors(self):
-        result = []
+    def _real_scan_monitors(self) -> tuple:
+        """
+        Считывает готовность мониторов.
+
+        MODE 01 PID 01 — статус с момента сброса ошибок (все протоколы OBD-II).
+        MODE 01 PID 41 — статус текущего ездового цикла (CAN / KWP2000).
+
+        Возвращает (rows: list[tuple], summary: str).
+        """
+
+        # Точные имена атрибутов объекта Status в python-obd
+        # (взяты из obd/decoders.py: BASE_TESTS + SPARK_TESTS + COMPRESSION_TESTS)
+        NAME_RU = {
+            # --- базовые (3 монитора, всегда присутствуют) ---
+            "MISFIRE_MONITORING":                "Пропуски зажигания",
+            "FUEL_SYSTEM_MONITORING":            "Топливная система",
+            "COMPONENT_MONITORING":              "Компоненты (общий)",
+            # --- бензиновые (spark ignition) ---
+            "CATALYST_MONITORING":               "Катализатор",
+            "HEATED_CATALYST_MONITORING":        "Подогреваемый катализатор",
+            "EVAPORATIVE_SYSTEM_MONITORING":     "Система EVAP",
+            "SECONDARY_AIR_SYSTEM_MONITORING":   "Вторичная подача воздуха",
+            "OXYGEN_SENSOR_MONITORING":          "Лямбда-зонды",
+            "OXYGEN_SENSOR_HEATER_MONITORING":   "Подогрев лямбда-зондов",
+            "EGR_VVT_SYSTEM_MONITORING":         "EGR / VVT",
+            # --- дизельные (compression ignition) ---
+            "NMHC_CATALYST_MONITORING":          "NMHC катализатор",
+            "NOX_SCR_AFTERTREATMENT_MONITORING": "NOx / SCR",
+            "BOOST_PRESSURE_MONITORING":         "Давление наддува",
+            "EXHAUST_GAS_SENSOR_MONITORING":     "Датчик ОГ",
+            "PM_FILTER_MONITORING":              "Сажевый фильтр (DPF)",
+        }
+
+        result  = []
+        summary = ""
+
+        # ── PID 01: статус с момента сброса DTC ──────────────
         try:
             resp = self.connection.query(obd.commands.STATUS)
-            if not resp.is_null() and resp.value is not None:
-                s = resp.value
-                # python-obd может использовать разные имена атрибутов в разных версиях
-                checks = [
-                    ("Пропуски зажигания", getattr(s, "MISFIRE_MONITORING",
-                                           getattr(s, "MISFIRE", None))),
-                    ("Топливная система",  getattr(s, "FUEL_SYSTEM_MONITORING",
-                                           getattr(s, "FUEL_SYSTEM", None))),
-                    ("Катализатор",        getattr(s, "CATALYST_MONITORING",
-                                           getattr(s, "CATALYST", None))),
-                    ("Система EVAP",       getattr(s, "EVAPORATIVE_SYSTEM_MONITORING",
-                                           getattr(s, "EVAPORATIVE_SYSTEM", None))),
-                    ("Лямбда-зонд",        getattr(s, "OXYGEN_SENSOR_MONITORING",
-                                           getattr(s, "OXYGEN_SENSOR", None))),
-                    ("EGR",                getattr(s, "EGR_MONITORING",
-                                           getattr(s, "EGR_VVT_SYSTEM",
-                                           getattr(s, "EGR", None)))),
-                ]
-                for name, mon in checks:
-                    if mon is not None:
-                        avail = "Да" if getattr(mon, "available", False) else "Нет"
-                        comp  = "Готов" if getattr(mon, "complete", False) else "Не завершён"
-                        result.append((name, avail, comp))
-                if not result:
-                    # Попытка перебрать все атрибуты объекта STATUS
-                    for attr in dir(s):
-                        if attr.startswith("_"):
-                            continue
-                        mon = getattr(s, attr, None)
-                        if mon is not None and hasattr(mon, "available") and hasattr(mon, "complete"):
-                            avail = "Да" if mon.available else "Нет"
-                            comp  = "Готов" if mon.complete else "Не завершён"
-                            result.append((attr, avail, comp))
         except Exception as e:
-            self.after(0, lambda e=e: self._log(f"Ошибка считывания мониторов: {e}"))
-        return result
+            self.after(0, lambda e=e: self._log(f"STATUS (PID 01) — ошибка запроса: {e}"))
+            return [], f"Ошибка запроса PID 01: {e}"
+
+        if resp.is_null() or resp.value is None:
+            self.after(0, lambda: self._log(
+                "STATUS (PID 01): нет ответа — старый протокол или авто не поддерживает"
+            ))
+            return [], "PID 01 не поддерживается этим автомобилем"
+
+        s = resp.value
+
+        mil_text = "ВКЛ (Check Engine горит)" if s.MIL else "выкл"
+        ignition = getattr(s, "ignition_type", "неизвестно")
+        dtc_cnt  = getattr(s, "DTC_count", 0)
+        summary  = f"MIL: {mil_text}  |  Зажигание: {ignition}  |  DTC по счётчику: {dtc_cnt}"
+        self.after(0, lambda: self._log(f"Мониторы — {summary}"))
+
+        seen = set()
+        for attr, name_ru in NAME_RU.items():
+            mon = getattr(s, attr, None)
+            if mon is None:
+                continue
+            if not mon.available:
+                continue   # эта система не поддерживается данным авто — пропускаем
+            comp = "Готов" if mon.complete else "Не завершён"
+            result.append((name_ru, "Да", comp))
+            seen.add(attr)
+
+        # Если ни один монитор не обозначен как available — авто ответило нулями.
+        # Показываем все атрибуты «как есть» (без фильтра по available), чтобы
+        # пользователь хотя бы видел таблицу, а не пустой экран.
+        if not result:
+            self.after(0, lambda: self._log(
+                "PID 01: все мониторы = available:False — возможно, старый протокол или холодный двигатель"
+            ))
+            for attr, name_ru in NAME_RU.items():
+                mon = getattr(s, attr, None)
+                if mon is not None:
+                    comp = "Готов" if mon.complete else "Не завершён"
+                    result.append((name_ru, "—", comp))
+
+        # ── PID 41: статус текущего ездового цикла ───────────
+        # Поддерживается CAN и KWP2000, но не ISO 9141-2
+        try:
+            resp2 = self.connection.query(obd.commands.STATUS_DRIVE_CYCLE)
+            if not resp2.is_null() and resp2.value is not None:
+                s2 = resp2.value
+                self.after(0, lambda: self._log("STATUS_DRIVE_CYCLE (PID 41): получен"))
+                existing_names = {row[0] for row in result}
+                for attr, name_ru in NAME_RU.items():
+                    mon = getattr(s2, attr, None)
+                    if mon is None or not mon.available:
+                        continue
+                    comp = "Готов" if mon.complete else "Не завершён"
+                    label = f"{name_ru} (цикл)"
+                    if label not in existing_names:
+                        result.append((label, "Да", comp))
+            else:
+                self.after(0, lambda: self._log(
+                    "STATUS_DRIVE_CYCLE (PID 41): нет ответа (ISO 9141-2 не поддерживает)"
+                ))
+        except Exception:
+            pass  # PID 41 не критичен — просто нет данных текущего цикла
+
+        return result, summary
 
     def _real_live_data(self):
         cmds = [
