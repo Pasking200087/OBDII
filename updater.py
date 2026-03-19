@@ -22,10 +22,10 @@ GITHUB_USER  = "Pasking200087"          # ваш логин на GitHub
 GITHUB_REPO  = "OBDII"    # название репозитория
 GITHUB_TOKEN = "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"          # Personal Access Token (read:packages, contents)
 
-# Файл с актуальной версией лежит в корне репозитория
-VERSION_URL = (
+# API endpoint последнего релиза
+RELEASE_URL = (
     f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}"
-    f"/contents/version.json"
+    f"/releases/latest"
 )
 
 # Текущая версия программы (меняйте при каждом релизе)
@@ -77,13 +77,6 @@ def _download_file(url: str, dest: Path) -> bool:
         return False
 
 
-def _version_tuple(v: str) -> tuple:
-    """'1.2.3' → (1, 2, 3) для сравнения."""
-    try:
-        return tuple(int(x) for x in v.strip().split("."))
-    except Exception:
-        return (0,)
-
 
 # ─────────────────────────────────────────────────────────
 # Публичный API
@@ -110,27 +103,30 @@ def check_for_update() -> dict | None:
         "size_mb":      4.2,
     }
     """
-    data = _gh_request(VERSION_URL)
-    if not data:
+    data = _gh_request(RELEASE_URL)
+    if not data or "tag_name" not in data:
         return None
 
-    # GitHub API отдаёт содержимое файла в base64
-    import base64
-    try:
-        content = base64.b64decode(data["content"]).decode()
-        info = json.loads(content)
-    except Exception:
-        return None
-
-    remote_ver = info.get("version", "0.0.0")
-    if _version_tuple(remote_ver) <= _version_tuple(CURRENT_VERSION):
+    remote_ver = data["tag_name"]
+    if remote_ver == CURRENT_VERSION:
         return None   # уже актуальная версия
+
+    # Берём первый asset (.exe)
+    assets = data.get("assets", [])
+    if not assets:
+        return None
+
+    asset = assets[0]
+    size_mb = round(asset.get("size", 0) / 1024 / 1024, 1)
+
+    # URL для приватного репозитория — через API с авторизацией
+    asset_api_url = asset.get("url", "")
 
     return {
         "version":      remote_ver,
-        "description":  info.get("description", ""),
-        "download_url": info.get("download_url", ""),
-        "size_mb":      info.get("size_mb", 0),
+        "description":  data.get("body", ""),
+        "download_url": asset_api_url,
+        "size_mb":      size_mb,
     }
 
 
