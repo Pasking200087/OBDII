@@ -119,6 +119,81 @@ COLORS = {
 }
 
 # ─────────────────────────────────────────────────────────
+# Декодирование VIN
+# ─────────────────────────────────────────────────────────
+
+# WMI (первые 3 символа VIN) → производитель
+_WMI = {
+    # Япония
+    "JHM": "Honda", "JH4": "Honda", "JH2": "Honda",
+    "JTD": "Toyota", "JTE": "Toyota", "JTF": "Toyota", "JTJ": "Toyota",
+    "JN1": "Nissan", "JN8": "Nissan", "JN6": "Nissan",
+    "JS1": "Suzuki", "JS2": "Suzuki", "JS3": "Suzuki",
+    "JM1": "Mazda", "JM3": "Mazda",
+    "JA3": "Mitsubishi", "JA4": "Mitsubishi",
+    "JF1": "Subaru", "JF2": "Subaru",
+    # Корея
+    "KNA": "Kia", "KND": "Kia", "KNB": "Kia",
+    "KMH": "Hyundai", "KMF": "Hyundai", "KM8": "Hyundai",
+    "KL4": "Daewoo/Chevrolet",
+    # США
+    "1G1": "Chevrolet", "1G6": "Cadillac", "1GC": "Chevrolet Truck",
+    "1FA": "Ford", "1FB": "Ford", "1FC": "Ford", "1FT": "Ford Truck",
+    "1C4": "Chrysler", "1C6": "Ram", "2C3": "Chrysler",
+    "1HG": "Honda (США)", "1VW": "Volkswagen (США)",
+    "2T1": "Toyota (Канада)", "2HG": "Honda (Канада)",
+    # Германия
+    "WBA": "BMW", "WBS": "BMW M", "WBY": "BMW",
+    "WDD": "Mercedes-Benz", "WDB": "Mercedes-Benz",
+    "WVW": "Volkswagen", "WV2": "VW Bus", "WV1": "VW LCV",
+    "WAU": "Audi", "WA1": "Audi SUV",
+    "WP0": "Porsche", "WP1": "Porsche SUV",
+    "W0L": "Opel",
+    # Франция
+    "VF1": "Renault", "VF3": "Peugeot", "VF7": "Citroën",
+    # Италия
+    "ZAR": "Alfa Romeo", "ZFF": "Ferrari", "ZLA": "Lancia",
+    "ZCF": "Iveco",
+    # Великобритания
+    "SAJ": "Jaguar", "SAL": "Land Rover", "SAR": "Rover",
+    "SCB": "Bentley", "SCC": "Lotus",
+    # Швеция
+    "YV1": "Volvo", "YV4": "Volvo", "YS3": "Saab",
+    # Россия
+    "XTA": "ВАЗ/Lada", "XTT": "ВАЗ", "X7L": "Lada",
+    "X9F": "УАЗ", "XUF": "УАЗ",
+    "X4X": "Chevrolet Niva",
+    # Китай
+    "LSG": "Buick (Китай)", "LFV": "VW (Китай)", "LVS": "Ford (Китай)",
+    "LHG": "Honda (Китай)", "LNY": "Hyundai (Китай)",
+}
+
+# Позиция 10 VIN → год выпуска
+_YEAR = {
+    "A": 1980, "B": 1981, "C": 1982, "D": 1983, "E": 1984,
+    "F": 1985, "G": 1986, "H": 1987, "J": 1988, "K": 1989,
+    "L": 1990, "M": 1991, "N": 1992, "P": 1993, "R": 1994,
+    "S": 1995, "T": 1996, "V": 1997, "W": 1998, "X": 1999,
+    "Y": 2000, "1": 2001, "2": 2002, "3": 2003, "4": 2004,
+    "5": 2005, "6": 2006, "7": 2007, "8": 2008, "9": 2009,
+    "A": 2010, "B": 2011, "C": 2012, "D": 2013, "E": 2014,
+    "F": 2015, "G": 2016, "H": 2017, "J": 2018, "K": 2019,
+    "L": 2020, "M": 2021, "N": 2022, "P": 2023, "R": 2024,
+    "S": 2025,
+}
+
+def _decode_vin(vin: str | None) -> dict:
+    """Декодирует VIN → dict с make, year, vin."""
+    if not vin or len(vin) < 11:
+        return {}
+    vin = vin.upper().strip()
+    wmi  = vin[:3]
+    make = _WMI.get(wmi) or _WMI.get(vin[:2])
+    year = _YEAR.get(vin[9])
+    return {"vin": vin, "make": make or wmi, "year": year}
+
+
+# ─────────────────────────────────────────────────────────
 # Главное окно
 # ─────────────────────────────────────────────────────────
 
@@ -134,6 +209,7 @@ class OBDApp(tk.Tk):
         self.demo_mode  = DEMO_MODE_FORCED
         self.scanning   = False
         self.live_running = False
+        self.vehicle_info = {}   # VIN, производитель, год
 
         self._build_ui()
         self._update_status("Готов к подключению", COLORS["text_dim"])
@@ -155,6 +231,10 @@ class OBDApp(tk.Tk):
         self.status_label = tk.Label(hdr, text="", font=("Consolas", 10),
                                      bg=COLORS["bg"], fg=COLORS["text_dim"])
         self.status_label.pack(side="right", padx=10)
+
+        self.vehicle_label = tk.Label(hdr, text="", font=("Consolas", 11),
+                                      bg=COLORS["bg"], fg=COLORS["yellow"])
+        self.vehicle_label.pack(side="right", padx=20)
 
         # Разделитель
         tk.Frame(self, bg=COLORS["border"], height=1).pack(fill="x", padx=20)
@@ -509,6 +589,28 @@ class OBDApp(tk.Tk):
         self._log("Подключено к автомобилю!")
         self.btn_scan.config(state="normal")
         self.btn_live.config(state="normal")
+        threading.Thread(target=self._read_vehicle_info, daemon=True).start()
+
+    def _read_vehicle_info(self):
+        """Считывает VIN и определяет автомобиль."""
+        try:
+            resp = self.connection.query(obd.commands.VIN)
+            vin = str(resp.value).strip() if not resp.is_null() and resp.value else None
+        except Exception:
+            vin = None
+
+        info = _decode_vin(vin)
+        self.vehicle_info = info
+        self.after(0, lambda: self._show_vehicle_info(info))
+
+    def _show_vehicle_info(self, info):
+        if info.get("make"):
+            text = f"{info['make']}  {info.get('year', '')}".strip()
+            self._log(f"Автомобиль: {text}  |  VIN: {info.get('vin', 'не считан')}")
+            self.vehicle_label.config(text=text)
+        else:
+            self._log("VIN не считан (авто не поддерживает или старый протокол)")
+            self.vehicle_label.config(text="")
 
     def _on_connect_fail(self, msg):
         self._update_status("● Не подключено", COLORS["red"])
@@ -651,6 +753,9 @@ class OBDApp(tk.Tk):
         lines = []
         lines.append("ОТЧЁТ ДИАГНОСТИКИ АВТОМОБИЛЯ")
         lines.append(f"Дата: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+        if self.vehicle_info:
+            lines.append(f"Автомобиль: {self.vehicle_info.get('make', '')} {self.vehicle_info.get('year', '')}")
+            lines.append(f"VIN: {self.vehicle_info.get('vin', 'не считан')}")
         lines.append("=" * 60)
 
         lines.append("\nКОДЫ ОШИБОК (DTC):")
