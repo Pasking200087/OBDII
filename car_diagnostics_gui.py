@@ -1279,13 +1279,16 @@ class OBDApp(tk.Tk):
             self.port_var.set("AUTO")
 
     def _toggle_connect(self):
-        """Кнопка «Подключить» / «✕ Отмена» — переключается по состоянию."""
+        """Кнопка «Подключить» / «✕ Отмена» / «✖ Отключить» — переключается по состоянию."""
         if self.btn_connect["text"].startswith("✕"):
             # Идёт подключение — отменяем
             self._connect_cancel.set()
             self._log("Подключение отменено пользователем")
             self._update_status("● Не подключено", COLORS["red"])
             self.btn_connect.config(text="⚡ Подключить", bg=COLORS["accent"])
+        elif self.connection is not None:
+            # Уже подключены — отключаемся
+            self._disconnect()
         else:
             self._connect()
 
@@ -1389,10 +1392,29 @@ class OBDApp(tk.Tk):
     def _on_connect_ok(self):
         self._update_status("● Подключено", COLORS["green"])
         self._log("Подключено к автомобилю!")
-        self.btn_connect.config(text="⚡ Подключить", bg=COLORS["accent"])
+        self.btn_connect.config(text="✖ Отключить", bg=COLORS["red"])
         self.btn_scan.config(state="normal")
         self.btn_live.config(state="normal")
         threading.Thread(target=self._read_vehicle_info, daemon=True).start()
+
+    def _disconnect(self):
+        """Закрыть соединение и сбросить интерфейс."""
+        if self.live_running:
+            self.live_running = False
+            self.btn_live.config(text="▶ Запустить мониторинг", bg=COLORS["green"])
+            self.live_hz.config(text="")
+        try:
+            self.connection.close()
+        except Exception:
+            pass
+        self.connection = None
+        self.btn_connect.config(text="⚡ Подключить", bg=COLORS["accent"])
+        self.btn_scan.config(state="disabled")
+        self.btn_live.config(state="disabled")
+        self.vehicle_label.config(text="")
+        self.vehicle_info = {}
+        self._update_status("● Не подключено", COLORS["red"])
+        self._log("Отключено от автомобиля")
 
     def _read_vehicle_info(self):
         """Считывает VIN и определяет автомобиль."""
@@ -1508,6 +1530,13 @@ class OBDApp(tk.Tk):
                 data[0] = ("Обороты двигателя", str(800 + random.randint(-50, 150)), "об/мин")
                 data[2] = ("Темп. охлаждающей жидкости", str(89 + random.randint(0, 5)), "°C")
             else:
+                if self.connection is None:
+                    self.after(0, lambda: self._log("Мониторинг: соединение потеряно"))
+                    self.live_running = False
+                    self.after(0, lambda: self.btn_live.config(
+                        text="▶ Запустить мониторинг", bg=COLORS["green"]))
+                    self.after(0, lambda: self.live_hz.config(text=""))
+                    break
                 data = self._real_live_data()
 
             self.after(0, lambda d=data: self._update_live_table(d))
@@ -1644,23 +1673,41 @@ class OBDApp(tk.Tk):
         result = []
         try:
             resp = self.connection.query(obd.commands.STATUS)
-            if not resp.is_null() and resp.value:
+            if not resp.is_null() and resp.value is not None:
                 s = resp.value
+                # python-obd может использовать разные имена атрибутов в разных версиях
                 checks = [
-                    ("Пропуски зажигания",  getattr(s, "MISFIRE_MONITORING", None)),
-                    ("Топливная система",    getattr(s, "FUEL_SYSTEM_MONITORING", None)),
-                    ("Катализатор",          getattr(s, "CATALYST_MONITORING", None)),
-                    ("Система EVAP",         getattr(s, "EVAPORATIVE_SYSTEM_MONITORING", None)),
-                    ("Лямбда-зонд",         getattr(s, "OXYGEN_SENSOR_MONITORING", None)),
-                    ("EGR",                  getattr(s, "EGR_MONITORING", None)),
+                    ("Пропуски зажигания", getattr(s, "MISFIRE_MONITORING",
+                                           getattr(s, "MISFIRE", None))),
+                    ("Топливная система",  getattr(s, "FUEL_SYSTEM_MONITORING",
+                                           getattr(s, "FUEL_SYSTEM", None))),
+                    ("Катализатор",        getattr(s, "CATALYST_MONITORING",
+                                           getattr(s, "CATALYST", None))),
+                    ("Система EVAP",       getattr(s, "EVAPORATIVE_SYSTEM_MONITORING",
+                                           getattr(s, "EVAPORATIVE_SYSTEM", None))),
+                    ("Лямбда-зонд",        getattr(s, "OXYGEN_SENSOR_MONITORING",
+                                           getattr(s, "OXYGEN_SENSOR", None))),
+                    ("EGR",                getattr(s, "EGR_MONITORING",
+                                           getattr(s, "EGR_VVT_SYSTEM",
+                                           getattr(s, "EGR", None)))),
                 ]
                 for name, mon in checks:
                     if mon is not None:
                         avail = "Да" if getattr(mon, "available", False) else "Нет"
                         comp  = "Готов" if getattr(mon, "complete", False) else "Не завершён"
                         result.append((name, avail, comp))
+                if not result:
+                    # Попытка перебрать все атрибуты объекта STATUS
+                    for attr in dir(s):
+                        if attr.startswith("_"):
+                            continue
+                        mon = getattr(s, attr, None)
+                        if mon is not None and hasattr(mon, "available") and hasattr(mon, "complete"):
+                            avail = "Да" if mon.available else "Нет"
+                            comp  = "Готов" if mon.complete else "Не завершён"
+                            result.append((attr, avail, comp))
         except Exception as e:
-            self._log(f"Ошибка считывания мониторов: {e}")
+            self.after(0, lambda e=e: self._log(f"Ошибка считывания мониторов: {e}"))
         return result
 
     def _real_live_data(self):
